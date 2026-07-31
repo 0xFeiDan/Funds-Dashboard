@@ -1,0 +1,5 @@
+import type {DashboardData,PnlData} from "../types";
+const base="/backend";
+export const csrf=()=>sessionStorage.getItem("csrf")||"";
+async function request<T>(path:string,init:RequestInit={}):Promise<T>{const r=await fetch(base+path,{credentials:"include",headers:{"Content-Type":"application/json",...(init.method&&init.method!=="GET"?{"X-CSRF-Token":csrf()}:{}),...init.headers},...init});if(!r.ok)throw new Error(r.status===401?"UNAUTHENTICATED":`请求失败（HTTP ${r.status}）`);return r.json()}
+export const api={login:async(username:string,password:string)=>{const d=await request<{csrf_token:string}>("/auth/login",{method:"POST",body:JSON.stringify({username,password})});sessionStorage.setItem("csrf",d.csrf_token)},dashboard:(refresh=false)=>request<DashboardData>(`/dashboard?refresh=${refresh}`),pnl:(range:string)=>request<PnlData>(`/pnl?range=${range}`),accounts:()=>request<Array<{id:string;exchange:string;name:string;public_identifier?:string}>>("/accounts"),createAccount:(body:unknown)=>request("/accounts",{method:"POST",body:JSON.stringify(body)}),refresh:(id:string)=>request(`/accounts/${id}/refresh`,{method:"POST"})};

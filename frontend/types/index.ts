@@ -1,0 +1,3 @@
+export type Position={exchange:string;account_name:string;symbol:string;side:"LONG"|"SHORT";quantity:string;entry_price?:string;mark_price?:string;position_value:string;unrealized_pnl:string;leverage?:string;margin_mode:string;liquidation_price?:string;liquidation_distance_percent?:string;risk_level:string;updated_at:string;is_stale:boolean};
+export type DashboardData={overview:Record<string,string>;accounts:Record<string,string>[];positions:Position[];connections:Record<string,string>[];net_exposure:Record<string,unknown>[]};
+export type PnlData={realized_pnl:string;funding_pnl:string;trading_fee:string;net_trading_pnl:string;deposit_withdrawal:string;data_complete:boolean;missing:string[];starting_at?:string};
