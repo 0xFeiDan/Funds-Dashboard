@@ -2,7 +2,7 @@ import asyncio,time
 from collections import defaultdict
 from datetime import datetime,timedelta,timezone
 import jwt
-from fastapi import APIRouter,Depends,HTTPException,Request,Response,WebSocket,WebSocketDisconnect,status
+from fastapi import APIRouter,Depends,HTTPException,Request,Response,status
 from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,7 @@ from .schemas import AccountCreate,AccountView,Login
 from .security import encrypt,password_hash,unauthorized,verify_password
 from .services.portfolio import PortfolioService
 from .services.history import pnl_summary
-router=APIRouter(); bearer=HTTPBearer(auto_error=False); login_attempts=defaultdict(list)
+router=APIRouter(prefix="/api"); bearer=HTTPBearer(auto_error=False); login_attempts=defaultdict(list)
 def token(user:User)->str:return jwt.encode({"sub":user.id,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},settings.session_secret,algorithm="HS256")
 def current_user(request:Request, credentials:HTTPAuthorizationCredentials|None=Depends(bearer))->str:
     raw=request.cookies.get("session") or (credentials.credentials if credentials else None)
@@ -22,7 +22,7 @@ def current_user(request:Request, credentials:HTTPAuthorizationCredentials|None=
     except jwt.PyJWTError: unauthorized()
 def csrf(request:Request):
     if request.headers.get("x-csrf-token")!=request.cookies.get("csrf"): raise HTTPException(403,"CSRF validation failed")
-async def service(session:AsyncSession=Depends(db_session), request:Request=None): return PortfolioService(session,request.app.state.redis)
+async def service(session:AsyncSession=Depends(db_session), request:Request=None): return PortfolioService(session,request.app.state.cache)
 @router.post("/auth/login")
 async def login(body:Login,request:Request,response:Response,session:AsyncSession=Depends(db_session)):
     ip=request.client.host if request.client else "unknown"; cutoff=time.time()-900; login_attempts[ip]=[x for x in login_attempts[ip] if x>cutoff]
@@ -61,9 +61,3 @@ async def pnl(range:str="7d",user_id:str=Depends(current_user),session:AsyncSess
     if days is None and range!="all": raise HTTPException(422,"range must be 1d, 7d, 30d, or all")
     ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
     return await pnl_summary(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
-@router.get("/health/live")
-async def live():return {"status":"live"}
-@router.get("/health/ready")
-async def ready(request:Request):
-    try: await request.app.state.redis.ping();return {"status":"ready"}
-    except Exception: raise HTTPException(503,"Redis unavailable")
