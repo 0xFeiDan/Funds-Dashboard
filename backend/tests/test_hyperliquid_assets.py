@@ -1,13 +1,15 @@
 import pytest
+import httpx
 
 from app.adapters.hyperliquid import HyperliquidAdapter
+from app.adapters.http import request
 
 
 @pytest.mark.asyncio
 async def test_hyperliquid_collects_perp_spot_vault_and_subaccounts():
     adapter = HyperliquidAdapter("account-1", "我的 Hyperliquid", {}, "0xmaster")
 
-    async def info(payload):
+    async def info(payload, **_kwargs):
         request_type, user, dex = payload["type"], payload.get("user"), payload.get("dex", "")
         if request_type == "perpDexs":
             return [{"name": "xyz"}]
@@ -45,3 +47,31 @@ async def test_hyperliquid_collects_perp_spot_vault_and_subaccounts():
     assert next(position for position in positions if position.base_asset == "HYPE").position_value == 20
     assert next(position for position in positions if position.contract_type == "VAULT_EQUITY").position_value == 25
     assert sum(position.position_value for position in positions if position.contract_type == "STAKING") == 12
+
+
+@pytest.mark.asyncio
+async def test_hyperliquid_allows_empty_optional_vault_and_staking_products():
+    adapter = HyperliquidAdapter("account-1", "我的 Hyperliquid", {}, "0xmaster")
+
+    async def info(payload, **_kwargs):
+        request_type = payload["type"]
+        if request_type == "perpDexs": return []
+        if request_type == "subAccounts": return []
+        if request_type == "spotMeta": return {"tokens": [], "universe": []}
+        if request_type == "allMids": return {}
+        if request_type == "clearinghouseState": return {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
+        if request_type == "spotClearinghouseState": return {"balances": []}
+        if request_type in {"userVaultEquities", "delegatorSummary"}: return None
+        raise AssertionError(payload)
+
+    adapter._info = info
+    summary, positions = await adapter.reconcile_state()
+    assert summary.account_equity == 1
+    assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_optional_json_null_is_not_an_invalid_exchange_response():
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, content=b"null", headers={"content-type": "application/json"}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await request(client, "POST", "https://example.test/info", allow_null=True) is None

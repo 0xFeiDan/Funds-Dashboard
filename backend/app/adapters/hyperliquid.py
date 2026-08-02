@@ -30,9 +30,9 @@ class HyperliquidAdapter(ExchangeAdapter):
             raise AuthenticationError("Hyperliquid requires a public wallet or vault address")
         return self.public_identifier.strip()
 
-    async def _info(self, payload: dict):
+    async def _info(self, payload: dict, *, allow_null: bool = False):
         async with httpx.AsyncClient(base_url=self.base_url, timeout=12) as client:
-            return await request(client, "POST", "/info", json=payload)
+            return await request(client, "POST", "/info", json=payload, allow_null=allow_null)
 
     async def health_check(self) -> dict:
         await self._info({"type": "clearinghouseState", "user": self._address()})
@@ -88,8 +88,11 @@ class HyperliquidAdapter(ExchangeAdapter):
         for address, label in addresses:
             requests = [self._info({"type": "clearinghouseState", "user": address, "dex": dex}) for dex in dexs]
             requests.append(self._info({"type": "spotClearinghouseState", "user": address}))
-            requests.append(self._info({"type": "userVaultEquities", "user": address}))
-            requests.append(self._info({"type": "delegatorSummary", "user": address}))
+            # These optional products may legitimately return JSON null for an
+            # account that has never used them; that must not break the entire
+            # portfolio snapshot.
+            requests.append(self._info({"type": "userVaultEquities", "user": address}, allow_null=True))
+            requests.append(self._info({"type": "delegatorSummary", "user": address}, allow_null=True))
             results = await asyncio.gather(*requests)
             for dex, state in zip(dexs, results[:len(dexs)]):
                 if isinstance(state, dict):

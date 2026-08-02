@@ -32,7 +32,8 @@ class PortfolioService:
             await self.session.commit()
         except Exception as exc:
             payload=previous if previous else {"summary":None,"positions":[]}
-            payload["status"]={"state":"ERROR","last_rest_success":payload.get("status",{}).get("last_rest_success"),"error":exc.__class__.__name__}
+            detail=str(exc).replace("\n"," ").strip()
+            payload["status"]={"state":"ERROR","last_rest_success":payload.get("status",{}).get("last_rest_success"),"error":f"{exc.__class__.__name__}{': '+detail if detail else ''}"}
             self.session.add(ConnectionStatus(exchange_account_id=account.id,external_id=None,occurred_at=datetime.now(timezone.utc),payload=payload["status"]))
             await self.session.commit()
         await self.redis.set(key,json.dumps(payload,default=str),ex=3600)
