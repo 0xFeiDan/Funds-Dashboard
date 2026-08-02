@@ -11,6 +11,8 @@ const nf = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 const compact = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 2 });
 const fmt = (value?: string, short = false) => (short ? compact : nf).format(Number(value ?? 0) || 0);
 const signed = (value?: string) => `${Number(value ?? 0) >= 0 ? "+" : ""}${fmt(value)}`;
+const money = (value?: string) => `$${fmt(value)}`;
+const pct = (value: number) => `${value < 0.01 && value > 0 ? "<0.01" : fmt(String(value))}%`;
 const cnRisk = (risk?: string) => ({ SAFE: "低风险", WATCH: "留意", DANGER: "高风险", CRITICAL: "紧急" }[risk ?? ""] ?? "待确认");
 const cnState = (state?: string) => ({ LIVE: "实时", CONNECTED: "已连接", WARNING: "延迟", STALE: "过期", DISCONNECTED: "断开", ERROR: "异常" }[state ?? ""] ?? "等待同步");
 const icon = (symbol: string) => <span className="icon" aria-hidden>{symbol}</span>;
@@ -31,10 +33,10 @@ function Metric({ label, value, unit = "USDT", kind = "plain", detail, mark }: {
 }
 
 function Exposure({ rows }: { rows: Record<string, unknown>[] }) {
-  const visible = rows.slice(0, 4); const colors = ["#2d76ec", "#17a49d", "#f1993b", "#8e98a7"];
-  const total = visible.reduce((sum, row) => sum + Math.abs(Number(row.gross_notional ?? 0)), 0);
-  const stops = visible.map((row, index) => `${colors[index]} ${Math.max(3, (Math.abs(Number(row.gross_notional ?? 0)) / (total || 1)) * 100)}%`).join(", ");
-  return <section className="panel exposure"><header><div><p className="eyebrow">EXPOSURE</p><h2>全局敞口概览</h2></div><span className="mini-chip">按名义价值</span></header>{visible.length ? <div className="exposure-body"><div className="asset-list">{visible.map((row, index) => { const long = Number(row.long_notional ?? 0); const short = Number(row.short_notional ?? 0); const longPart = long + short ? long / (long + short) * 100 : 50; return <div className="asset-row" key={String(row.asset)}><strong><i style={{ background: colors[index] }} />{String(row.asset)}</strong><span className="split"><i className="long" style={{ width: `${longPart}%` }} /><i className="short" style={{ width: `${100 - longPart}%` }} /></span><b>{fmt(String(row.gross_notional), true)}</b><small>{fmt(String(Math.abs(Number(row.gross_notional ?? 0)) / (total || 1) * 100))}%</small></div>; })}<p className="legend"><span><i />多头</span><span><i />空头</span></p></div><div className="donut-area"><div className="donut" style={{ background: `conic-gradient(${stops})` }}><div><b>{fmt(String(total), true)}</b><small>USDT</small></div></div><small>总敞口</small></div></div> : <Empty text="配置账户后，跨平台敞口会在这里汇总。" />}</section>;
+  const visible = rows.map(row => ({ asset: String(row.asset ?? "其他"), value: Math.abs(Number(row.gross_notional ?? 0)), long: Number(row.long_notional ?? 0), short: Number(row.short_notional ?? 0) })).filter(row => row.value > 0).sort((a, b) => b.value - a.value);
+  const total = visible.reduce((sum, row) => sum + row.value, 0);
+  const colors = ["#197a86", "#e5962d", "#3e73df", "#8b97a9"];
+  return <section className="panel exposure"><header><div><p className="eyebrow">EXPOSURE</p><h2>资产敞口</h2></div><span className="mini-chip">按可计价市值</span></header>{visible.length ? <div className="exposure-list">{visible.map((row, index) => { const share = row.value / total * 100; const directional = row.long + row.short > 0; return <div className="exposure-item" key={row.asset}><div className="exposure-item-heading"><span><i style={{ background: colors[index] }} />{row.asset}</span><b>{money(String(row.value))}</b><strong>{pct(share)}</strong></div><div className="exposure-track"><i style={{ width: `${Math.max(share, .6)}%`, background: colors[index] }} /></div>{directional && <small>合约方向：多 {money(String(row.long))} · 空 {money(String(row.short))}</small>}</div>; })}</div> : <Empty text="配置账户后，跨平台敞口会在这里汇总。" />}</section>;
 }
 
 function Radar({ positions }: { positions: Position[] }) {
@@ -57,12 +59,65 @@ function Accounts({ accounts, connections }: { accounts: Row[]; connections: Row
   return <section className="panel accounts"><header><div><p className="eyebrow">CONNECTIONS</p><h2>账户状态</h2></div>{icon("◌")}</header>{rows.length ? rows.map((account, index) => { const matched = connections.find(connection => connection.account_id === account.account_id); const state = String(matched?.state ?? account.state ?? account.data_state ?? "CONNECTED"); const failure = String(matched?.error ?? account.error ?? ""); return <div className="account" key={String(account.account_id ?? index)}><span>{String(account.exchange ?? "?").slice(0, 1).toUpperCase()}</span><div><b>{String(account.account_name ?? account.name ?? account.exchange)}</b><p>{failure ? `同步失败：${failure}` : account.account_equity ? `${fmt(String(account.account_equity), true)} USDT` : "等待快照"}</p></div><em className={state.toLowerCase()}><i />{cnState(state)}</em></div>; }) : <Empty text="没有已连接账户。" />}</section>;
 }
 
+function EquityChart({ history }: { history: EquityHistory | null }) {
+  const points = history?.points ?? [];
+  if (points.length < 2) return <section className="hero-chart empty-chart"><div><p className="eyebrow">EQUITY TREND</p><h2>近 30 天权益</h2></div><Empty text="净值快照正在累积，稍后会在这里显示权益趋势。" /></section>;
+  const values = points.map(point => Number(point.equity));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const polyline = values.map((value, index) => `${(index / (values.length - 1)) * 100},${100 - ((value - min) / range) * 76 - 10}`).join(" ");
+  const first = points[0]; const last = points.at(-1)!;
+  return <section className="hero-chart"><header><div><p className="eyebrow">EQUITY TREND</p><h2>近 30 天权益</h2></div><span className="mini-chip">{history?.data_complete ? "快照完整" : "部分数据"}</span></header><div className="chart-value"><b className={Number(history?.change) >= 0 ? "positive" : "negative"}>{signed(history?.change)} <small>USDT</small></b><span>区间权益变化</span></div><div className="line-chart" aria-label="近 30 天权益曲线"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><defs><linearGradient id="equity-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#2678ee" stopOpacity=".18" /><stop offset="1" stopColor="#2678ee" stopOpacity="0" /></linearGradient></defs><path d={`M 0,100 L ${polyline.replace(/ /g, " L ")} L 100,100 Z`} fill="url(#equity-fill)" /><polyline points={polyline} fill="none" stroke="#168f98" strokeWidth="1.7" vectorEffect="non-scaling-stroke" /></svg></div><footer><span>{new Date(first.at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}</span><span>{new Date(last.at).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}</span></footer></section>;
+}
+
+function AssetAllocation({ rows }: { rows: Record<string, unknown>[] }) {
+  const items = rows.map(row => ({ asset: String(row.asset ?? "其他"), value: Math.abs(Number(row.gross_notional ?? 0)) })).filter(item => item.value > 0).sort((a, b) => b.value - a.value);
+  const total = items.reduce((sum, item) => sum + item.value, 0);
+  const colors = ["#197a86", "#e5962d", "#3e73df", "#8b97a9"];
+  return <section className="panel allocation"><header><div><p className="eyebrow">ALLOCATION</p><h2>资产配置</h2></div><span className="mini-chip">按市值</span></header>{items.length ? <div className="allocation-list">{items.slice(0, 5).map((item, index) => { const share = item.value / total * 100; return <div className="allocation-row" key={item.asset}><div><i style={{ backgroundColor: colors[index] }} /><b>{item.asset}</b></div><span className="allocation-track"><i style={{ width: `${Math.max(share, .6)}%`, backgroundColor: colors[index] }} /></span><strong>{pct(share)}</strong><small>{money(String(item.value))}</small></div>; })}</div> : <Empty text="尚无可计价资产。" />}</section>;
+}
+
+function AssetBalances({ rows }: { rows: Position[] }) {
+  const assets = rows.filter(row => row.contract_type !== "PERPETUAL");
+  return <section className="panel asset-balances"><header><div><p className="eyebrow">BALANCES</p><h2>资产余额</h2></div><span className="mini-chip">{assets.length} 项资产</span></header>{assets.length ? <div className="table-scroll"><table><thead><tr><th>资产</th><th>平台 / 网络</th><th>数量</th><th>USD 价值</th><th>占比</th></tr></thead><tbody>{assets.map((row, index) => <tr key={`${row.exchange}-${row.symbol}-${index}`}><td><b>{row.symbol}</b><small>{row.account_name}</small></td><td>{row.exchange}</td><td>{fmt(row.quantity)}</td><td><b>{money(row.position_value)}</b></td><td>{pct(Number(row.position_value) / Math.max(assets.reduce((sum, item) => sum + Number(item.position_value || 0), 0), 1) * 100)}</td></tr>)}</tbody></table></div> : <Empty text="尚无可展示的资产余额。" />}</section>;
+}
+
+function ContractPositions({ rows }: { rows: Position[] }) {
+  const positions = rows.filter(row => row.contract_type === "PERPETUAL");
+  return <section className="panel contract-positions"><header><div><p className="eyebrow">PERPETUALS</p><h2>合约仓位</h2></div><span className="mini-chip">{positions.length} 个活跃仓位</span></header>{positions.length ? <div className="table-scroll"><table><thead><tr><th>平台 / 合约</th><th>方向</th><th>持仓规模</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th></tr></thead><tbody>{positions.map((row, index) => <tr key={`${row.exchange}-${row.symbol}-${index}`}><td><b>{row.symbol}</b><small>{row.exchange} · {row.account_name}</small></td><td><span className={`side ${row.side === "LONG" ? "long" : "short"}`}>{row.side === "LONG" ? "多" : "空"}</span></td><td>{money(row.position_value)}</td><td>{fmt(row.entry_price)}</td><td>{fmt(row.mark_price)}</td><td className={Number(row.unrealized_pnl) >= 0 ? "positive" : "negative"}>{signed(row.unrealized_pnl)} USDT</td></tr>)}</tbody></table></div> : <div className="intentional-empty"><span>▱</span><b>当前无合约仓位</b><p>没有杠杆风险，也没有待监控的强平价格。</p></div>}</section>;
+}
+
 function Coverage({ rows }: { rows: DashboardData["coverage"] }) {
   return <section className="coverage-grid">{rows.map(row => <article className="coverage-card" key={row.account_id}><header><div><p className="eyebrow">ASSET COVERAGE</p><h2>{row.account_name}</h2><p>{row.exchange}</p></div><span className={row.state === "ERROR" ? "coverage-error" : "coverage-ready"}>{row.state === "ERROR" ? "异常" : "已核对"}</span></header>{row.error ? <div className="coverage-message">{row.error}</div> : <div className="coverage-items">{row.items.map(item => <div key={item.name}><b>{item.name}</b><span className={item.state === "READY" ? "ready" : "missing"}>{item.detail}</span></div>)}</div>}</article>)}</section>;
 }
 
 function Overview({ data, refresh }: { data: DashboardData; refresh: () => void }) {
-  const overview = data.overview; return <><header className="topbar"><div><p className="eyebrow"><i className="live" />实时同步</p><h1>资产总览</h1><p>最后更新：{overview.updated_at ? new Date(overview.updated_at).toLocaleString("zh-CN", { hour12: false }) : "等待同步"}</p></div><div><button className="refresh" onClick={refresh}>↻ 刷新数据</button><button className="selector">主账户　⌄</button></div></header><section className="metric-grid"><Metric label="总权益" value={overview.account_equity} detail="当前可汇总账户权益" mark="▦" /><Metric label="可用保证金" value={overview.available_balance} detail="可用作风险缓冲" mark="◇" /><Metric label="未实现盈亏" value={overview.unrealized_pnl} kind={Number(overview.unrealized_pnl) >= 0 ? "gain" : "loss"} detail="所有活跃仓位合计" mark="⌁" /><Metric label="有效杠杆" value={overview.effective_leverage} unit="×" detail={`名义仓位 ${fmt(overview.total_position_notional, true)} USDT`} mark="◔" /></section><div className="top-grid"><Exposure rows={data.net_exposure} /><Radar positions={data.positions} /></div><div className="bottom-grid"><Positions rows={data.positions} /><Accounts accounts={data.accounts as Row[]} connections={data.connections as Row[]} /></div></>;
+  const overview = data.overview;
+  const [equity, setEquity] = useState<EquityHistory | null>(null);
+  useEffect(() => { api.equity("30d").then(setEquity).catch(() => setEquity(null)); }, []);
+  const updated = overview.updated_at ? new Date(overview.updated_at).toLocaleString("zh-CN", { hour12: false }) : "等待同步";
+  const allocations = data.net_exposure.map(row => ({ asset: String(row.asset ?? ""), value: Math.abs(Number(row.gross_notional ?? 0)) }));
+  const largest = allocations.reduce((top, row) => row.value > top.value ? row : top, { asset: "—", value: 0 });
+  const allocationTotal = allocations.reduce((sum, row) => sum + row.value, 0) || 1;
+  const perpetuals = data.positions.filter(row => row.contract_type === "PERPETUAL");
+  const dangerous = perpetuals.filter(row => ["DANGER", "CRITICAL"].includes(row.risk_level)).length;
+  const nearest = perpetuals.reduce((minimum, row) => Math.min(minimum, Number(row.liquidation_distance_percent ?? Infinity)), Infinity);
+  return <><header className="topbar"><div><p className="eyebrow"><i className="live" />实时同步</p><h1>资产总览</h1><p>最后更新：{updated}</p></div><div><button className="refresh" onClick={refresh}>↻ 刷新数据</button><button className="selector">全部账户　⌄</button></div></header><section className="overview-hero"><article className="portfolio-summary"><p className="eyebrow">PORTFOLIO VALUE</p><h2>总资产</h2><strong>{money(overview.account_equity)} <small>USDT</small></strong><p className="updated-label">已汇总可计价资产 · {updated}</p><div className="summary-stats"><div><span>可用资金</span><b>{money(overview.available_balance)}</b></div><div><span>未实现盈亏</span><b className={Number(overview.unrealized_pnl) >= 0 ? "positive" : "negative"}>{signed(overview.unrealized_pnl)} USDT</b></div><div><span>有效杠杆</span><b>{fmt(overview.effective_leverage)}×</b></div></div></article><EquityChart history={equity} /></section><section className="overview-secondary"><AssetAllocation rows={data.net_exposure} /><section className="panel risk-summary"><header><div><p className="eyebrow">RISK SUMMARY</p><h2>风险摘要</h2></div><span className={`risk ${dangerous ? "danger" : "safe"}`}>{dangerous ? "需要处理" : "状态正常"}</span></header><div className="risk-summary-list"><div><span>杠杆仓位</span><b>{perpetuals.length} 个</b><small>{perpetuals.length ? `名义价值 ${money(overview.total_position_notional)}` : "当前没有合约敞口"}</small></div><div><span>强平风险</span><b className={dangerous ? "negative" : "positive"}>{dangerous ? `${dangerous} 个高风险` : "低"}</b><small>{Number.isFinite(nearest) ? `最近强平距离 ${fmt(String(nearest))}%` : "无强平价格需要监控"}</small></div><div><span>最大资产配置</span><b>{largest.asset} {pct(largest.value / allocationTotal * 100)}</b><small>按当前可计价资产市值计算</small></div></div></section><Accounts accounts={data.accounts as Row[]} connections={data.connections as Row[]} /></section><section className="overview-tables"><AssetBalances rows={data.positions} /><ContractPositions rows={data.positions} /></section></>;
+}
+
+function PositionsPage({ data }: { data: DashboardData }) {
+  const perpetuals = data.positions.filter(row => row.contract_type === "PERPETUAL");
+  const balances = data.positions.filter(row => row.contract_type !== "PERPETUAL");
+  const assetValue = balances.reduce((sum, row) => sum + Number(row.position_value || 0), 0);
+  const perpetualValue = perpetuals.reduce((sum, row) => sum + Number(row.position_value || 0), 0);
+  return <section className="page page-shell"><div className="page-heading"><div><p className="eyebrow">PORTFOLIO INVENTORY</p><h1>统一持仓</h1><p>资产余额与合约仓位分开呈现，避免把现货套进合约字段。</p></div><span className="page-note">只显示可计价资产</span></div><section className="position-kpis"><article><span>资产余额</span><b>{balances.length} 项</b><small>{money(String(assetValue))} USD 价值</small></article><article><span>合约仓位</span><b>{perpetuals.length} 个</b><small>{money(String(perpetualValue))} 名义价值</small></article><article><span>未实现盈亏</span><b className={Number(data.overview.unrealized_pnl) >= 0 ? "positive" : "negative"}>{signed(data.overview.unrealized_pnl)}</b><small>仅合约仓位计入</small></article></section><section className="overview-tables"><AssetBalances rows={data.positions} /><ContractPositions rows={data.positions} /></section></section>;
+}
+
+function ExposurePage({ data }: { data: DashboardData }) {
+  const total = data.net_exposure.reduce((sum, row) => sum + Math.abs(Number(row.gross_notional ?? 0)), 0);
+  const perpetuals = data.positions.filter(row => row.contract_type === "PERPETUAL");
+  return <section className="page page-shell"><div className="page-heading"><div><p className="eyebrow">RISK EXPOSURE</p><h1>风险敞口</h1><p>按可计价资产市值汇总；合约方向仅在存在杠杆仓位时单独展示。</p></div><span className="page-note">总市值 {money(String(total))}</span></div><section className="exposure-page-grid"><Exposure rows={data.net_exposure} /><section className="panel exposure-context"><p className="eyebrow">POSITION CONTEXT</p><h2>仓位语境</h2><div><span>活跃合约</span><b>{perpetuals.length} 个</b></div><div><span>有效杠杆</span><b>{fmt(data.overview.effective_leverage)}×</b></div><div><span>可用资金</span><b>{money(data.overview.available_balance)}</b></div><p>现货、链上原生币和稳定币不显示虚假的强平风险。</p></section></section><AssetAllocation rows={data.net_exposure} /></section>;
 }
 
 function Settings({ reload }: { reload: () => void }) {
@@ -115,8 +170,8 @@ export function Dashboard() {
   if (error.includes("UNAUTHENTICATED")) return <Login done={() => load(true)} />;
   if (!data) return <main className="loading"><span /><p>{error ? "暂时无法读取仪表盘" : "正在建立只读数据连接…"}</p>{error && <button className="refresh" onClick={() => load(true)}>重试</button>}</main>;
   let content: React.ReactNode = <Overview data={data} refresh={() => load(true)} />;
-  if (page === "positions") content = <section className="page"><p className="eyebrow">POSITIONS</p><h1>统一持仓</h1><p>跨交易所的当前仓位、盈亏与强平距离。</p><Positions rows={data.positions} /></section>;
-  if (page === "exposure") content = <section className="page"><p className="eyebrow">EXPOSURE</p><h1>风险敞口</h1><p>按资产合并多空名义价值，不隐式进行汇率换算。</p><Exposure rows={data.net_exposure} /></section>;
+  if (page === "positions") content = <PositionsPage data={data} />;
+  if (page === "exposure") content = <ExposurePage data={data} />;
   if (page === "pnl") content = <><PerformancePage positions={data.positions} /><AttributionPanel /><HistoricalSnapshotPanel /></>;
   if (page === "status") content = <section className="page"><p className="eyebrow">CONNECTIONS</p><h1>资产覆盖与核对</h1><p>总权益只汇总已读取且可计价的资产。</p><Coverage rows={data.coverage ?? []} /><Accounts accounts={data.accounts as Row[]} connections={data.connections as Row[]} /></section>;
   if (page === "settings") content = <Settings reload={() => load(true)} />;
