@@ -6,7 +6,7 @@ import httpx
 import websockets
 
 from .base import ExchangeAdapter
-from .errors import AuthenticationError
+from .errors import AuthenticationError, InvalidResponseError
 from .http import dec, request
 from ..risk import liquidation_distance, risk_level
 from ..schemas import DataSource, Exchange, MarginMode, NormalizedAccountSummary, NormalizedPosition, RiskLevel, Side
@@ -32,7 +32,10 @@ class HyperliquidAdapter(ExchangeAdapter):
 
     async def _info(self, payload: dict, *, allow_null: bool = False):
         async with httpx.AsyncClient(base_url=self.base_url, timeout=12) as client:
-            return await request(client, "POST", "/info", json=payload, allow_null=allow_null)
+            try:
+                return await request(client, "POST", "/info", json=payload, allow_null=allow_null)
+            except InvalidResponseError as exc:
+                raise InvalidResponseError(f"{payload.get('type', 'info')}: {exc}") from exc
 
     async def health_check(self) -> dict:
         await self._info({"type": "clearinghouseState", "user": self._address()})
@@ -50,7 +53,9 @@ class HyperliquidAdapter(ExchangeAdapter):
     async def _addresses(self) -> list[tuple[str, str]]:
         master = self._address()
         rows: list[tuple[str, str]] = [(master, "主账户")]
-        raw = await self._info({"type": "subAccounts", "user": master})
+        # Hyperliquid returns JSON null, rather than [], when a master account
+        # has no child accounts.
+        raw = await self._info({"type": "subAccounts", "user": master}, allow_null=True)
         if isinstance(raw, list):
             for index, item in enumerate(raw, start=1):
                 if isinstance(item, dict) and isinstance(item.get("subAccountUser"), str):

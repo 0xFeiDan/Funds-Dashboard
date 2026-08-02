@@ -56,7 +56,7 @@ async def test_hyperliquid_allows_empty_optional_vault_and_staking_products():
     async def info(payload, **_kwargs):
         request_type = payload["type"]
         if request_type == "perpDexs": return []
-        if request_type == "subAccounts": return []
+        if request_type == "subAccounts": return None
         if request_type == "spotMeta": return {"tokens": [], "universe": []}
         if request_type == "allMids": return {}
         if request_type == "clearinghouseState": return {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
