@@ -103,7 +103,11 @@ class PortfolioService:
             public["data_state"]="DISCONNECTED" if age>=settings.disconnected_seconds else "STALE" if age>=settings.stale_seconds else "WARNING" if age>=settings.stale_warning_seconds else "LIVE"
             return public
         public_accounts=[annotate(s) for s in summaries]
-        public_positions=[annotate(p) for p in positions]
+        # A wallet token without a reliable price is not a monitored asset.
+        # Keep raw exchange responses server-side, but do not pollute balances,
+        # exposure, PnL, or the browser with airdrop/dust tokens.
+        monitored=[p for p in positions if p.get("contract_type")=="PERPETUAL" or p.get("mark_price") not in (None, "", "0", "0.0")]
+        public_positions=[annotate(p) for p in monitored]
         connections=[]
         coverage=[]
         for row in rows:
