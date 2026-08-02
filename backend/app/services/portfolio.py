@@ -116,7 +116,8 @@ class PortfolioService:
 def net_exposure(positions:list[dict],total_equity:Decimal)->list[dict]:
     out=defaultdict(lambda:{"long_quantity":ZERO,"short_quantity":ZERO,"long_notional":ZERO,"short_notional":ZERO,"long_unrealized_pnl":ZERO,"short_unrealized_pnl":ZERO,"by_exchange":defaultdict(lambda:ZERO)})
     for p in positions:
-        row=out[p["base_asset"]]; q=Decimal(p["quantity"]); n=Decimal(p["position_value"]); pnl=Decimal(p["unrealized_pnl"])
+        asset="USD" if p["base_asset"] in {"USDT","USDC"} else p["base_asset"]
+        row=out[asset]; q=Decimal(p["quantity"]); n=Decimal(p["position_value"]); pnl=Decimal(p["unrealized_pnl"])
         if p["side"]=="LONG":row["long_quantity"]+=q;row["long_notional"]+=n;row["long_unrealized_pnl"]+=pnl
         else:row["short_quantity"]+=q;row["short_notional"]+=n;row["short_unrealized_pnl"]+=pnl
         row["by_exchange"][p["exchange"]]+=n

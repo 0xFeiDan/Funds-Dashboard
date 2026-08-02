@@ -70,8 +70,9 @@ class EvmAdapter(OnchainAdapter):
         result=[("ETH", native, await self._price(), "ONCHAIN_NATIVE")]
         for row in tokens:
             token = row.get("token", {}) if isinstance(row, dict) else {}; decimals = int(token.get("decimals") or 0); quantity = dec(row.get("value")) / (Decimal(10) ** decimals) if decimals >= 0 else ZERO
-            symbol = str(token.get("symbol") or token.get("name") or "ERC-20")
-            result.append((symbol, quantity, None, "ERC20"))
+            symbol = str(token.get("symbol") or token.get("name") or "ERC-20").upper()
+            # Dollar stablecoins are a reporting-currency bucket, not dust.
+            result.append((symbol, quantity, Decimal("1") if symbol in {"USDT", "USDC"} else None, "ERC20"))
         return result
 
 
