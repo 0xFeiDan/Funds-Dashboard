@@ -6,6 +6,8 @@ import "./attribution.css";
 import "./history.css";
 import "./overview.css";
 import "./pages.css";
+import "./accounts.css";
+import "./accessibility.css";
 
 export const metadata = {
   title: "资金驾驶舱",

@@ -29,11 +29,15 @@ def coverage_for(account:ExchangeAccount,payload:dict)->dict:
         types=raw.get("all_account_types",""); items=[item("账户估值",types or "未返回",bool(types)),item("现货","逐币种读取")]
     elif account.exchange=="bitcoin": items=[item("BTC 原生币","UTXO 余额")]
     elif account.exchange in {"ethereum","arbitrum"}: items=[item("原生 ETH"),item("ERC-20","自动枚举")]
+    elif account.exchange=="solana": items=[item("原生 SOL"),item("SPL Token","自动枚举")]
     else: items=[item("永续账户")]
     return {"account_id":account.id,"account_name":account.name,"exchange":account.exchange,"state":"ERROR" if error else "READY","error":error or None,"items":items}
 class PortfolioService:
     def __init__(self, session:AsyncSession, redis): self.session,self.redis=session,redis
-    async def accounts(self,user_id:str): return (await self.session.scalars(select(ExchangeAccount).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    async def accounts(self,user_id:str,account_id:str|None=None):
+        statement=select(ExchangeAccount).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True))
+        if account_id: statement=statement.where(ExchangeAccount.id==account_id)
+        return (await self.session.scalars(statement)).all()
     async def adapter(self,account:ExchangeAccount):
         credential=await self.session.scalar(select(EncryptedCredential).where(EncryptedCredential.exchange_account_id==account.id))
         secrets=decrypt(credential.ciphertext,credential.nonce) if credential else {}
@@ -77,8 +81,8 @@ class PortfolioService:
         await self.redis.publish(f"portfolio:user:{account.user_id}",json.dumps({"event":"portfolio_updated","account_id":account.id,"reason":reason,"at":datetime.now(timezone.utc).isoformat()}))
         return payload
     async def refresh_all(self,user_id:str)->list[dict]: return await asyncio.gather(*(self.refresh_account(a) for a in await self.accounts(user_id)))
-    async def dashboard(self,user_id:str,refresh:bool=False)->dict:
-        accounts=await self.accounts(user_id)
+    async def dashboard(self,user_id:str,refresh:bool=False,account_id:str|None=None)->dict:
+        accounts=await self.accounts(user_id,account_id)
         if refresh: await asyncio.gather(*(self.refresh_account(a) for a in accounts))
         rows=[]
         for account in accounts:

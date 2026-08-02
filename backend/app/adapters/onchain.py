@@ -20,7 +20,9 @@ class OnchainAdapter(ExchangeAdapter):
         return self.public_identifier.strip()
 
     async def _price(self) -> Decimal | None:
-        symbol = "BTCUSDT" if self.native_symbol == "BTC" else "ETHUSDT"
+        symbol = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}.get(self.native_symbol)
+        if not symbol:
+            return None
         try:
             async with httpx.AsyncClient(base_url="https://api.binance.com", timeout=10) as client:
                 row = await request(client, "GET", "/api/v3/ticker/price", params={"symbol": symbol})
@@ -82,3 +84,50 @@ class EthereumAdapter(EvmAdapter):
 
 class ArbitrumAdapter(EvmAdapter):
     chain = "arbitrum"; native_symbol = "ETH"; explorer = "https://arbitrum.blockscout.com"
+
+
+class SolanaAdapter(OnchainAdapter):
+    """Public-address reader for native SOL and SPL token-account balances."""
+
+    chain = "solana"; native_symbol = "SOL"; explorer = "https://api.mainnet-beta.solana.com"
+    _token_programs = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+    _known_tokens = {
+        "So11111111111111111111111111111111111111112": ("SOL", None),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC", Decimal("1")),
+        "Es9vMFrzaCERmJfrF4H2FYD8q5jD3S9pB9oszkKCNghB": ("USDT", Decimal("1")),
+    }
+
+    async def _rpc(self, client: httpx.AsyncClient, method: str, params: list[object]) -> object:
+        payload = await request(client, "POST", "/", json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        if not isinstance(payload, dict) or payload.get("error") or "result" not in payload:
+            raise InvalidResponseError(f"Solana {method} response malformed")
+        return payload["result"]
+
+    async def _balances(self) -> list[tuple[str, Decimal, Decimal | None, str]]:
+        address = self._address()
+        options = {"encoding": "jsonParsed", "commitment": "finalized"}
+        async with httpx.AsyncClient(base_url=self.explorer, timeout=15) as client:
+            native, *token_results = await __import__("asyncio").gather(
+                self._rpc(client, "getBalance", [address, {"commitment": "finalized"}]),
+                *(self._rpc(client, "getTokenAccountsByOwner", [address, {"programId": program}, options]) for program in self._token_programs),
+            )
+        if not isinstance(native, dict):
+            raise InvalidResponseError("Solana balance response malformed")
+        sol_price = await self._price()
+        rows: list[tuple[str, Decimal, Decimal | None, str]] = [("SOL", dec(native.get("value")) / Decimal("1000000000"), sol_price, "ONCHAIN_NATIVE")]
+        totals: dict[str, Decimal] = {}
+        for result in token_results:
+            values = result.get("value") if isinstance(result, dict) else None
+            if not isinstance(values, list):
+                raise InvalidResponseError("Solana token-account response malformed")
+            for account in values:
+                info = account.get("account", {}).get("data", {}).get("parsed", {}).get("info", {}) if isinstance(account, dict) else {}
+                amount = info.get("tokenAmount", {}) if isinstance(info, dict) else {}
+                mint = str(info.get("mint") or "")
+                quantity = dec(amount.get("uiAmountString"))
+                if mint and quantity > ZERO:
+                    totals[mint] = totals.get(mint, ZERO) + quantity
+        for mint, quantity in totals.items():
+            symbol, price = self._known_tokens.get(mint, (f"SPL-{mint[:6]}", None))
+            rows.append((symbol, quantity, sol_price if mint == "So11111111111111111111111111111111111111112" else price, "SPL"))
+        return rows

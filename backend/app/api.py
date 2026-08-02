@@ -5,11 +5,12 @@ import jwt
 from fastapi import APIRouter,Depends,HTTPException,Request,Response,status
 from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .db import db_session
 from .db_models import AuditLog,EncryptedCredential,ExchangeAccount,User
-from .schemas import AccountCreate,AccountView,Login
+from .schemas import AccountCreate,AccountRename,AccountView,Login
 from .security import encrypt,password_hash,unauthorized,verify_password
 from .services.portfolio import PortfolioService
 from .services.history import equity_history,pnl_attribution,pnl_summary,portfolio_as_of
@@ -23,6 +24,10 @@ def current_user(request:Request, credentials:HTTPAuthorizationCredentials|None=
 def csrf(request:Request):
     if request.headers.get("x-csrf-token")!=request.cookies.get("csrf"): raise HTTPException(403,"CSRF validation failed")
 async def service(session:AsyncSession=Depends(db_session), request:Request=None): return PortfolioService(session,request.app.state.cache)
+async def scoped_account_ids(session:AsyncSession,user_id:str,account_id:str|None=None)->list[str]:
+    statement=select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True))
+    if account_id: statement=statement.where(ExchangeAccount.id==account_id)
+    return list((await session.scalars(statement)).all())
 @router.post("/auth/login")
 async def login(body:Login,request:Request,response:Response,session:AsyncSession=Depends(db_session)):
     ip=request.client.host if request.client else "unknown"; cutoff=time.time()-900; login_attempts[ip]=[x for x in login_attempts[ip] if x>cutoff]
@@ -48,32 +53,44 @@ async def create_account(body:AccountCreate,user_id:str=Depends(current_user),_:
         ciphertext,nonce=encrypt(values);session.add(EncryptedCredential(exchange_account_id=record.id,ciphertext=ciphertext,nonce=nonce))
     session.add(AuditLog(exchange_account_id=record.id,payload={"event":"exchange_account_created","exchange":record.exchange,"name":record.name,"user_id":user_id}))
     await session.commit();return AccountView(id=record.id,exchange=record.exchange,name=record.name,public_identifier=record.public_identifier,enabled=record.enabled)
+@router.put("/accounts/{account_id}",response_model=AccountView)
+async def rename_account(account_id:str,body:AccountRename,user_id:str=Depends(current_user),_:None=Depends(csrf),session:AsyncSession=Depends(db_session)):
+    record=await session.scalar(select(ExchangeAccount).where(ExchangeAccount.id==account_id,ExchangeAccount.user_id==user_id))
+    if not record: raise HTTPException(404,"Account not found")
+    name=body.name.strip()
+    if not name: raise HTTPException(422,"Account name cannot be blank")
+    previous=record.name; record.name=name
+    session.add(AuditLog(exchange_account_id=record.id,payload={"event":"exchange_account_renamed","previous_name":previous,"name":name,"user_id":user_id}))
+    try: await session.commit()
+    except IntegrityError as exc:
+        await session.rollback(); raise HTTPException(409,"An account with this exchange and name already exists") from exc
+    return AccountView(id=record.id,exchange=record.exchange,name=record.name,public_identifier=record.public_identifier,enabled=record.enabled)
 @router.post("/accounts/{account_id}/refresh")
 async def refresh(account_id:str,user_id:str=Depends(current_user),_:None=Depends(csrf),svc:PortfolioService=Depends(service)):
     account=next((a for a in await svc.accounts(user_id) if a.id==account_id),None)
     if not account: raise HTTPException(404,"Account not found")
     return await svc.refresh_account(account)
 @router.get("/dashboard")
-async def dashboard(refresh:bool=False,user_id:str=Depends(current_user),svc:PortfolioService=Depends(service)): return await svc.dashboard(user_id,refresh)
+async def dashboard(refresh:bool=False,account_id:str|None=None,user_id:str=Depends(current_user),svc:PortfolioService=Depends(service)): return await svc.dashboard(user_id,refresh,account_id)
 @router.get("/pnl")
-async def pnl(range:str="7d",user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+async def pnl(range:str="7d",account_id:str|None=None,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
     days={"1d":1,"7d":7,"30d":30,"all":None}.get(range)
     if days is None and range!="all": raise HTTPException(422,"range must be 1d, 7d, 30d, or all")
-    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    ids=await scoped_account_ids(session,user_id,account_id)
     return await pnl_summary(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
 @router.get("/history/equity")
-async def equity(range:str="30d",user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+async def equity(range:str="30d",account_id:str|None=None,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
     days={"7d":7,"30d":30,"90d":90,"all":None}.get(range)
     if days is None and range!="all": raise HTTPException(422,"range must be 7d, 30d, 90d, or all")
-    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    ids=await scoped_account_ids(session,user_id,account_id)
     return await equity_history(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
 @router.get("/pnl/attribution")
-async def attribution(range:str="30d",user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+async def attribution(range:str="30d",account_id:str|None=None,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
     days={"7d":7,"30d":30,"90d":90,"all":None}.get(range)
     if days is None and range!="all": raise HTTPException(422,"range must be 7d, 30d, 90d, or all")
-    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    ids=await scoped_account_ids(session,user_id,account_id)
     return await pnl_attribution(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
 @router.get("/history/snapshot")
-async def historical_snapshot(at:datetime,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
-    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+async def historical_snapshot(at:datetime,account_id:str|None=None,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+    ids=await scoped_account_ids(session,user_id,account_id)
     return await portfolio_as_of(session,ids,at.astimezone(timezone.utc))
