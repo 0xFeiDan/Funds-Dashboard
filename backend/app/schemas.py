@@ -3,7 +3,7 @@ from decimal import Decimal
 from enum import StrEnum
 from pydantic import BaseModel, Field, SecretStr, field_serializer
 
-class Exchange(StrEnum): BINANCE="binance"; BITGET="bitget"; HYPERLIQUID="hyperliquid"; LIGHTER="lighter"
+class Exchange(StrEnum): BINANCE="binance"; BITGET="bitget"; HYPERLIQUID="hyperliquid"; LIGHTER="lighter"; BITCOIN="bitcoin"; ETHEREUM="ethereum"; ARBITRUM="arbitrum"
 class Side(StrEnum): LONG="LONG"; SHORT="SHORT"
 class MarginMode(StrEnum): CROSS="CROSS"; ISOLATED="ISOLATED"; UNKNOWN="UNKNOWN"
 class RiskLevel(StrEnum): SAFE="SAFE"; WATCH="WATCH"; DANGER="DANGER"; CRITICAL="CRITICAL"; UNKNOWN="UNKNOWN"

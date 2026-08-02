@@ -27,6 +27,8 @@ def coverage_for(account:ExchangeAccount,payload:dict)->dict:
         spot_error=raw.get("spot_sync_error",""); items=[item("USD-M 合约"),item("现货",raw.get("spot_assets","0"),not bool(spot_error))]
     elif account.exchange=="bitget":
         types=raw.get("all_account_types",""); items=[item("账户估值",types or "未返回",bool(types)),item("现货","逐币种读取")]
+    elif account.exchange=="bitcoin": items=[item("BTC 原生币","UTXO 余额")]
+    elif account.exchange in {"ethereum","arbitrum"}: items=[item("原生 ETH"),item("ERC-20","自动枚举")]
     else: items=[item("永续账户")]
     return {"account_id":account.id,"account_name":account.name,"exchange":account.exchange,"state":"ERROR" if error else "READY","error":error or None,"items":items}
 class PortfolioService:
