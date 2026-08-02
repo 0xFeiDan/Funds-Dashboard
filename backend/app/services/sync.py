@@ -85,8 +85,13 @@ class SyncSupervisor:
             async for event in adapter.stream_account_updates(): yield event
         await reconcile("startup")
         periodic=asyncio.create_task(self._periodic_reconcile(reconcile),name=f"reconcile-{account_id}")
-        try: await reconnecting_stream(factory,on_event,lambda:reconcile("reconnect"),self.stop)
-        finally: periodic.cancel();await asyncio.gather(periodic,return_exceptions=True)
+        try:
+            await reconnecting_stream(factory,on_event,lambda:reconcile("reconnect"),self.stop)
+            # Public-wallet adapters do not have a private event stream. Keep
+            # periodic reconciliation alive after that expected condition.
+            await self.stop.wait()
+        finally:
+            periodic.cancel();await asyncio.gather(periodic,return_exceptions=True)
     async def _periodic_reconcile(self, reconcile:Callable[[str],Awaitable[None]])->None:
         while not self.stop.is_set():
             try: await asyncio.wait_for(self.stop.wait(),timeout=self.reconcile_interval)

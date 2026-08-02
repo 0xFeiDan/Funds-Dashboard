@@ -9,6 +9,8 @@ from ..risk import liquidation_distance,risk_level
 from ..schemas import DataSource,Exchange,MarginMode,NormalizedAccountSummary,NormalizedPosition,RiskLevel,Side
 class BitgetAdapter(ExchangeAdapter):
     base_url="https://api.bitget.com"
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs);self._snapshot_task:asyncio.Task|None=None;self._snapshot_result=None
     @property
     def product_type(self): return self.credentials.get("product_type","USDT-FUTURES")
     def _headers(self,path:str,query:dict[str,str])->dict[str,str]:
@@ -28,6 +30,18 @@ class BitgetAdapter(ExchangeAdapter):
     async def _all_account_balances(self)->list[dict]:
         data=await self._get("/api/v2/account/all-account-balance",{})
         return data if isinstance(data,list) else []
+    async def _snapshot(self):
+        if self._snapshot_result is not None:return self._snapshot_result
+        if self._snapshot_task is None:self._snapshot_task=asyncio.create_task(self._fetch_snapshot())
+        task=self._snapshot_task
+        try:
+            self._snapshot_result=await asyncio.shield(task)
+            return self._snapshot_result
+        finally:
+            if task.done() and self._snapshot_task is task:self._snapshot_task=None
+    async def _fetch_snapshot(self):
+        account,all_balances,positions,spot=await asyncio.gather(self._get("/api/v2/mix/account/accounts",{"productType":self.product_type}),self._all_account_balances(),self._get("/api/v2/mix/position/all-position",{"productType":self.product_type}),self._spot_assets())
+        return account,all_balances,positions,spot,datetime.now(timezone.utc)
     async def stream_account_updates(self):
         key,secret,passphrase=(self.credentials.get(k) for k in ("api_key","api_secret","passphrase"))
         if not all((key,secret,passphrase)): raise AuthenticationError("Bitget requires read-only credentials")
@@ -46,15 +60,15 @@ class BitgetAdapter(ExchangeAdapter):
                 if event.get("arg",{}).get("channel") in {"positions","account"}: yield event
     async def health_check(self)->dict: await self._get("/api/v2/mix/account/accounts",{"productType":self.product_type}); return {"ok":True,"transport":"REST"}
     async def get_account_summary(self)->NormalizedAccountSummary:
-        rows,all_balances=await asyncio.gather(self._get("/api/v2/mix/account/accounts",{"productType":self.product_type}),self._all_account_balances())
+        rows,all_balances,_,_,now=await self._snapshot()
         row=next((x for x in rows if dec(x.get("accountEquity"))!=0),rows[0] if rows else {})
-        now=datetime.now(timezone.utc); futures_equity=dec(row.get("accountEquity")); maint=dec(row.get("crossedRiskRate"))
+        futures_equity=dec(row.get("accountEquity")); maint=dec(row.get("crossedRiskRate"))
         total_equity=sum((dec(item.get("usdtBalance")) for item in all_balances if isinstance(item,dict)),ZERO)
         equity=total_equity if total_equity>ZERO else futures_equity
         categories=",".join(str(item.get("accountType")) for item in all_balances if isinstance(item,dict))
         return NormalizedAccountSummary(exchange=Exchange.BITGET,account_id=self.account_id,account_name=self.account_name,margin_currency="USDT",wallet_balance=equity,account_equity=equity,available_balance=dec(row.get("available")),unrealized_pnl=dec(row.get("unrealizedPL")),initial_margin=dec(row.get("locked")),maintenance_margin=ZERO,margin_ratio=maint if maint else None,total_position_notional=ZERO,updated_at=now,data_source=DataSource.REST,raw_values={"all_account_types":categories,"all_account_usdt":str(total_equity),**{k:str(row.get(k,"")) for k in ("accountEquity","available","unrealizedPL")}},field_notes={"account_equity":"Bitget all-account USDT valuation when available (spot, futures, funding, earn, bots and margin); falls back to configured futures product equity."})
     async def get_positions(self)->list[NormalizedPosition]:
-        rows,spot_assets=await asyncio.gather(self._get("/api/v2/mix/position/all-position",{"productType":self.product_type}),self._spot_assets()); now=datetime.now(timezone.utc); result=[]
+        _,_,rows,spot_assets,now=await self._snapshot(); result=[]
         for row in rows:
             size=dec(row.get("total"));
             if not size: continue

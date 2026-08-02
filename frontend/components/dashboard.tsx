@@ -203,10 +203,10 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null); const [page, setPage] = useState<Page>("overview"); const [error, setError] = useState(""); const [accountId, setAccountId] = useState("all"); const [accountOptions, setAccountOptions] = useState<AccountItem[]>([]); const [theme, setTheme] = useState<"light" | "dark">("light");
   const load = async (refresh = false) => { try { setData(await api.dashboard(refresh,scopedAccount(accountId))); setError(""); } catch (reason) { setError(requestMessage(reason)); } };
   useEffect(() => { void api.accounts().then(setAccountOptions).catch(() => setAccountOptions([])); }, []);
-  useEffect(() => { void load(true); const timer = window.setInterval(() => { void load(false); }, 15000); return () => window.clearInterval(timer); }, [accountId]);
+  useEffect(() => { void load(false); const timer = window.setInterval(() => { void load(false); }, 15000); return () => window.clearInterval(timer); }, [accountId]);
   useEffect(() => { const saved = window.localStorage.getItem("dashboard-theme"); if (saved === "dark") setTheme("dark"); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; window.localStorage.setItem("dashboard-theme", theme); }, [theme]);
-  if (error.includes("UNAUTHENTICATED")) return <Login done={() => load(true)} />;
+  if (error.includes("UNAUTHENTICATED")) return <Login done={() => load(false)} />;
   if (!data) return <main className="loading"><span /><p>{error ? "暂时无法读取仪表盘" : "正在建立只读数据连接…"}</p>{error && <button className="refresh" onClick={() => load(true)}>重试</button>}</main>;
   const configure = () => setPage("settings");
   let content: React.ReactNode = <Overview data={data} refresh={() => void load(true)} accountId={accountId} accountOptions={accountOptions} onAccountChange={setAccountId} onConfigure={configure} />;

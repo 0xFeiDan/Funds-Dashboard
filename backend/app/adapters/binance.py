@@ -11,6 +11,8 @@ from ..schemas import DataSource,Exchange,MarginMode,NormalizedAccountSummary,No
 class BinanceAdapter(ExchangeAdapter):
     base_url="https://fapi.binance.com"
     spot_base_url="https://api.binance.com"
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs);self._snapshot_task:asyncio.Task|None=None;self._snapshot_result=None
     def _signed(self,params:dict[str,object])->dict[str,str]:
         key,secret=self.credentials.get("api_key"),self.credentials.get("api_secret")
         if not key or not secret: raise AuthenticationError("Binance requires a read-only API key and secret")
@@ -31,6 +33,18 @@ class BinanceAdapter(ExchangeAdapter):
     async def _spot_snapshot(self)->tuple[list[dict],dict[str,Decimal],str|None]:
         results=await asyncio.gather(self._spot_account(),self._spot_prices(),return_exceptions=True); error=next((x for x in results if isinstance(x,Exception)),None)
         return ([],{},error.__class__.__name__) if error else (results[0],results[1],None)
+    async def _snapshot(self):
+        if self._snapshot_result is not None:return self._snapshot_result
+        if self._snapshot_task is None:self._snapshot_task=asyncio.create_task(self._fetch_snapshot())
+        task=self._snapshot_task
+        try:
+            self._snapshot_result=await asyncio.shield(task)
+            return self._snapshot_result
+        finally:
+            if task.done() and self._snapshot_task is task:self._snapshot_task=None
+    async def _fetch_snapshot(self):
+        account,positions,spot=await asyncio.gather(self._get("/fapi/v3/account"),self._get("/fapi/v3/positionRisk"),self._spot_snapshot())
+        return account,positions,spot,datetime.now(timezone.utc)
     async def _listen_key(self)->str:
         key=self.credentials.get("api_key")
         if not key: raise AuthenticationError("Binance requires a read-only API key")
@@ -60,7 +74,7 @@ class BinanceAdapter(ExchangeAdapter):
     async def health_check(self)->dict:
         await self._get("/fapi/v1/accountConfig"); return {"ok":True,"transport":"REST"}
     async def get_account_summary(self)->NormalizedAccountSummary:
-        data,(balances,prices,spot_error)=await asyncio.gather(self._get("/fapi/v3/account"),self._spot_snapshot()); now=datetime.now(timezone.utc)
+        data,_,(balances,prices,spot_error),now=await self._snapshot()
         equity=dec(data.get("totalMarginBalance")); wallet=dec(data.get("totalWalletBalance")); total=dec(data.get("totalPositionInitialMargin"))
         spot_total=sum(((dec(row.get("free"))+dec(row.get("locked")))*prices.get(str(row.get("asset") or ""),ZERO) for row in balances),ZERO)
         spot_available=sum((dec(row.get("free"))*prices.get(str(row.get("asset") or ""),ZERO) for row in balances),ZERO)
@@ -69,7 +83,7 @@ class BinanceAdapter(ExchangeAdapter):
         return NormalizedAccountSummary(exchange=Exchange.BINANCE,account_id=self.account_id,account_name=self.account_name,margin_currency="USD",wallet_balance=wallet+spot_total,account_equity=equity+spot_total,available_balance=dec(data.get("availableBalance"))+spot_available,unrealized_pnl=dec(data.get("totalUnrealizedProfit")),initial_margin=total,maintenance_margin=dec(data.get("totalMaintMargin")),margin_ratio=(dec(data.get("totalMaintMargin"))/equity if equity>0 else None),total_position_notional=ZERO,updated_at=now,data_source=DataSource.REST,raw_values={"spot_assets":str(len(balances)),"spot_sync_error":spot_error or ""},field_notes={"account_equity":note})
         return NormalizedAccountSummary(exchange=Exchange.BINANCE,account_id=self.account_id,account_name=self.account_name,margin_currency="USD",wallet_balance=wallet,account_equity=equity,available_balance=dec(data.get("availableBalance")),unrealized_pnl=dec(data.get("totalUnrealizedProfit")),initial_margin=total,maintenance_margin=dec(data.get("totalMaintMargin")),margin_ratio=(dec(data.get("totalMaintMargin"))/equity if equity>0 else None),total_position_notional=ZERO,updated_at=now,data_source=DataSource.REST,raw_values={k:str(data.get(k,"")) for k in ("totalWalletBalance","totalMarginBalance","availableBalance")},field_notes={"account_equity":"Binance totalMarginBalance; USDⓈ-M aggregate, do not combine with non-USD accounts."})
     async def get_positions(self)->list[NormalizedPosition]:
-        rows,(balances,prices,_)=await asyncio.gather(self._get("/fapi/v3/positionRisk"),self._spot_snapshot()); now=datetime.now(timezone.utc); output=[]
+        _,rows,(balances,prices,_),now=await self._snapshot(); output=[]
         for row in rows:
             amt=dec(row.get("positionAmt"));
             if not amt: continue

@@ -24,6 +24,7 @@ class HyperliquidAdapter(ExchangeAdapter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._cache: tuple[datetime, dict] | None = None
+        self._snapshot_task: asyncio.Task[dict] | None = None
 
     def _address(self) -> str:
         if not self.public_identifier:
@@ -83,6 +84,17 @@ class HyperliquidAdapter(ExchangeAdapter):
         now = datetime.now(timezone.utc)
         if self._cache and now - self._cache[0] < timedelta(seconds=10):
             return self._cache[1]
+        if self._snapshot_task is None:
+            self._snapshot_task = asyncio.create_task(self._fetch_snapshot())
+        task = self._snapshot_task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._snapshot_task is task:
+                self._snapshot_task = None
+
+    async def _fetch_snapshot(self) -> dict:
+        now = datetime.now(timezone.utc)
         addresses, dexs = await asyncio.gather(self._addresses(), self._perp_dexes())
         spot_meta, mids = await asyncio.gather(self._info({"type": "spotMeta"}), self._info({"type": "allMids"}))
         spot_prices = self._spot_prices(spot_meta, mids)
