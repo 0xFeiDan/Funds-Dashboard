@@ -45,8 +45,10 @@ class PortfolioService:
         rows=[]
         for account in accounts:
             raw=await self.redis.get(f"portfolio:{account.id}")
-            if raw: rows.append(json.loads(raw))
-        summaries=[x["summary"] for x in rows if x.get("summary")]; positions=[p for x in rows for p in x.get("positions",[])]
+            # Retain configuration identity when the first refresh fails, so a
+            # bad wallet address is visible as an error instead of "no assets".
+            rows.append({"account":account,"payload":json.loads(raw) if raw else {"summary":None,"positions":[],"status":{"state":"DISCONNECTED","error":"No snapshot yet"}}})
+        summaries=[x["payload"]["summary"] for x in rows if x["payload"].get("summary")]; positions=[p for x in rows for p in x["payload"].get("positions",[])]
         now=datetime.now(timezone.utc)
         def D(v): return Decimal(str(v or "0"))
         equity=sum((D(s["account_equity"]) for s in summaries),ZERO); notional=sum((D(p["position_value"]) for p in positions),ZERO)
@@ -63,7 +65,8 @@ class PortfolioService:
         public_positions=[annotate(p) for p in positions]
         connections=[]
         for row in rows:
-            state=dict(row.get("status",{})); summary=row.get("summary")
+            account=row["account"]; payload=row["payload"]
+            state={"account_id":account.id,"account_name":account.name,"exchange":account.exchange,**dict(payload.get("status",{}))}; summary=payload.get("summary")
             if summary and state.get("state")=="CONNECTED": state["state"]=annotate(summary)["data_state"]
             connections.append(state)
         return {"overview":overview,"accounts":public_accounts,"positions":public_positions,"connections":connections,"net_exposure":net_exposure(public_positions,equity)}
