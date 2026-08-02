@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Type
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from ..db_models import BalanceMovement, FundingPayment, Trade, TradingFee
+from ..db_models import AccountSnapshot, BalanceMovement, ExchangeAccount, FundingPayment, PortfolioHistoryState, Trade, TradingFee
 
 ZERO=Decimal("0")
 
@@ -50,3 +50,53 @@ async def pnl_summary(session:AsyncSession, account_ids:list[str], start:datetim
     fee_total=sum((abs(amount(x.payload,"income","fee","amount")) for x in fees),ZERO)
     movement_total=sum((amount(x.payload,"income","amount","change") for x in movements),ZERO)
     return {"realized_pnl":str(realized),"funding_pnl":str(funding_total),"trading_fee":str(fee_total),"net_trading_pnl":str(realized+funding_total-fee_total),"deposit_withdrawal":str(movement_total),"data_complete":False,"missing":["Unrealized PnL history is not reconstructed from account equity","Adapters without a documented history endpoint report partial history"],"starting_at":start.isoformat() if start else None}
+
+async def equity_history(session:AsyncSession, account_ids:list[str], start:datetime|None)->dict:
+    """Daily closing equity from persisted snapshots, never reconstructed from trades."""
+    if not account_ids:
+        return {"points":[],"change":"0","data_complete":False,"missing":["No configured accounts"]}
+    query=select(AccountSnapshot).where(AccountSnapshot.exchange_account_id.in_(account_ids)).order_by(AccountSnapshot.created_at)
+    if start: query=query.where(AccountSnapshot.created_at>=start)
+    rows=(await session.scalars(query)).all()
+    by_day:dict[str,dict[str,AccountSnapshot]]={}
+    for row in rows:
+        at=row.created_at.replace(tzinfo=timezone.utc) if row.created_at.tzinfo is None else row.created_at
+        by_day.setdefault(at.date().isoformat(),{})[row.exchange_account_id]=row
+    points=[]
+    for day,latest in sorted(by_day.items()):
+        equity=sum((Decimal(str(row.payload.get("account_equity") or "0")) for row in latest.values()),ZERO)
+        points.append({"at":f"{day}T00:00:00+00:00","equity":str(equity),"accounts_reported":len(latest),"expected_accounts":len(account_ids),"complete":len(latest)==len(account_ids)})
+    change=Decimal(points[-1]["equity"])-Decimal(points[0]["equity"]) if len(points)>1 else ZERO
+    return {"points":points,"change":str(change),"data_complete":bool(points) and all(point["complete"] for point in points),"missing":[] if points else ["No snapshots in selected range"]}
+
+async def pnl_attribution(session:AsyncSession, account_ids:list[str], start:datetime|None)->dict:
+    """Attribute only ledger-backed trading PnL; transfers stay out of trading profit."""
+    accounts=(await session.scalars(select(ExchangeAccount).where(ExchangeAccount.id.in_(account_ids)))).all()
+    account_map={row.id:row for row in accounts}; groups={"by_exchange":{},"by_account":{},"by_asset":{}}
+    def add(group:str,key:str,realized:Decimal=ZERO,funding:Decimal=ZERO,fee:Decimal=ZERO):
+        row=groups[group].setdefault(key,{"realized_pnl":ZERO,"funding_pnl":ZERO,"trading_fee":ZERO,"net_trading_pnl":ZERO})
+        row["realized_pnl"]+=realized;row["funding_pnl"]+=funding;row["trading_fee"]+=fee;row["net_trading_pnl"]+=realized+funding-fee
+    async def rows(model):
+        query=select(model).where(model.exchange_account_id.in_(account_ids))
+        if start:query=query.where(model.occurred_at>=start)
+        return (await session.scalars(query)).all()
+    for model,kind in ((Trade,"trade"),(FundingPayment,"funding"),(TradingFee,"fee")):
+        for row in await rows(model):
+            payload=row.payload; account=account_map.get(row.exchange_account_id); exchange=account.exchange if account else "unknown"; account_name=account.name if account else row.exchange_account_id
+            asset=str(payload.get("coin") or payload.get("symbol") or payload.get("asset") or "未分类")
+            realized=amount(payload,"realized_pnl","realizedPnl","closedPnl","income","profit","totalProfits") if kind=="trade" else ZERO
+            funding=amount(payload,"income","change","funding","amount") if kind=="funding" else ZERO
+            fee=abs(amount(payload,"income","fee","amount")) if kind=="fee" else ZERO
+            for group,key in (("by_exchange",exchange),("by_account",account_name),("by_asset",asset)): add(group,key,realized,funding,fee)
+    def render(group:str): return [{"name":key,**{field:str(value) for field,value in values.items()}} for key,values in sorted(groups[group].items(),key=lambda item:abs(item[1]["net_trading_pnl"]),reverse=True)]
+    return {"by_exchange":render("by_exchange"),"by_account":render("by_account"),"by_asset":render("by_asset"),"data_complete":False,"missing":["Only synchronized ledger rows are attributed; transfers are excluded from trading PnL."]}
+
+async def portfolio_as_of(session:AsyncSession, account_ids:list[str], at:datetime)->dict:
+    """Return the latest full snapshot at or before an instant for every account."""
+    result=[]; missing=[]
+    for account_id in account_ids:
+        row=await session.scalar(select(PortfolioHistoryState).where(PortfolioHistoryState.exchange_account_id==account_id,PortfolioHistoryState.created_at<=at).order_by(PortfolioHistoryState.created_at.desc()).limit(1))
+        if not row: missing.append(account_id); continue
+        created=row.created_at.replace(tzinfo=timezone.utc) if row.created_at.tzinfo is None else row.created_at
+        result.append({"account_id":account_id,"captured_at":created.isoformat(),"summary":row.payload.get("summary"),"positions":row.payload.get("positions",[])})
+    return {"at":at.isoformat(),"accounts":result,"missing_account_ids":missing,"data_complete":not missing}

@@ -1,16 +1,34 @@
 import asyncio,json
 from collections import defaultdict
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..adapters import ADAPTERS
 from ..config import settings
-from ..db_models import AccountSnapshot,ConnectionStatus,EncryptedCredential,ExchangeAccount,PositionSnapshot,ReconciliationLog
+from ..db_models import AccountSnapshot,ConnectionStatus,EncryptedCredential,ExchangeAccount,LatestPortfolioState,PortfolioHistoryState,PositionSnapshot,ReconciliationLog
 from ..risk import effective_leverage
 from ..schemas import Exchange,NormalizedAccountSummary,NormalizedPosition
 from ..security import decrypt
 ZERO=Decimal("0")
+def snapshot_changed(previous:dict|None, current:dict)->bool:
+    """Ignore refresh timestamps when deciding whether to retain a historical point."""
+    if not previous: return True
+    def clean(record:dict|None):
+        return {k:v for k,v in (record or {}).items() if k not in {"updated_at","is_stale"}}
+    return clean(previous.get("summary"))!=clean(current.get("summary")) or [clean(x) for x in previous.get("positions",[])]!=[clean(x) for x in current.get("positions",[])]
+def coverage_for(account:ExchangeAccount,payload:dict)->dict:
+    """Small, non-sensitive receipt of what this sync actually covered."""
+    summary=payload.get("summary") or {}; raw=summary.get("raw_values") or {}; error=str((payload.get("status") or {}).get("error") or "")
+    def item(name:str, count:str|None=None, ok:bool=True): return {"name":name,"detail":count or ("已读取" if ok else "未读取"),"state":"READY" if ok else "MISSING"}
+    if account.exchange=="hyperliquid":
+        items=[item("永续 DEX",raw.get("perp_dexes","0")),item("现货",raw.get("spot_assets","0")),item("Vault",raw.get("vaults","0")),item("HYPE 质押",raw.get("staking_entries","0")),item("子账户","自动发现")]
+    elif account.exchange=="binance":
+        spot_error=raw.get("spot_sync_error",""); items=[item("USD-M 合约"),item("现货",raw.get("spot_assets","0"),not bool(spot_error))]
+    elif account.exchange=="bitget":
+        types=raw.get("all_account_types",""); items=[item("账户估值",types or "未返回",bool(types)),item("现货","逐币种读取")]
+    else: items=[item("永续账户")]
+    return {"account_id":account.id,"account_name":account.name,"exchange":account.exchange,"state":"ERROR" if error else "READY","error":error or None,"items":items}
 class PortfolioService:
     def __init__(self, session:AsyncSession, redis): self.session,self.redis=session,redis
     async def accounts(self,user_id:str): return (await self.session.scalars(select(ExchangeAccount).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
@@ -18,15 +36,31 @@ class PortfolioService:
         credential=await self.session.scalar(select(EncryptedCredential).where(EncryptedCredential.exchange_account_id==account.id))
         secrets=decrypt(credential.ciphertext,credential.nonce) if credential else {}
         return ADAPTERS[Exchange(account.exchange)](account.id,account.name,secrets,account.public_identifier)
+    async def _stored_payload(self, account_id:str)->dict|None:
+        row=await self.session.scalar(select(LatestPortfolioState).where(LatestPortfolioState.exchange_account_id==account_id))
+        return dict(row.payload) if row else None
+    async def _save_latest(self, account_id:str, payload:dict)->None:
+        row=await self.session.scalar(select(LatestPortfolioState).where(LatestPortfolioState.exchange_account_id==account_id))
+        if row: row.payload=payload
+        else: self.session.add(LatestPortfolioState(exchange_account_id=account_id,payload=payload))
+    async def _store_history_if_due(self, account_id:str, payload:dict, changed:bool)->None:
+        last=await self.session.scalar(select(AccountSnapshot).where(AccountSnapshot.exchange_account_id==account_id).order_by(AccountSnapshot.created_at.desc()).limit(1))
+        now=datetime.now(timezone.utc)
+        last_at=last.created_at.replace(tzinfo=timezone.utc) if last and last.created_at.tzinfo is None else (last.created_at if last else None)
+        due=not last_at or now-last_at>=timedelta(seconds=settings.snapshot_interval_seconds)
+        if not (changed or due): return
+        self.session.add(AccountSnapshot(exchange_account_id=account_id,payload=payload["summary"]))
+        self.session.add_all(PositionSnapshot(exchange_account_id=account_id,payload=p) for p in payload["positions"])
+        self.session.add(PortfolioHistoryState(exchange_account_id=account_id,payload={"summary":payload["summary"],"positions":payload["positions"]}))
     async def refresh_account(self,account:ExchangeAccount,reason:str="manual")->dict:
         key=f"portfolio:{account.id}"
-        previous_raw=await self.redis.get(key);previous=json.loads(previous_raw) if previous_raw else None
+        previous_raw=await self.redis.get(key);previous=json.loads(previous_raw) if previous_raw else await self._stored_payload(account.id)
         try:
             adapter=await self.adapter(account); summary,positions=await adapter.reconcile_state()
             payload={"summary":summary.model_dump(mode="json"),"positions":[p.model_dump(mode="json") for p in positions],"status":{"state":"CONNECTED","last_rest_success":datetime.now(timezone.utc).isoformat(),"error":None}}
-            self.session.add(AccountSnapshot(exchange_account_id=account.id,payload=payload["summary"]))
-            self.session.add_all(PositionSnapshot(exchange_account_id=account.id,payload=p) for p in payload["positions"])
-            changed=not previous or previous.get("summary")!=payload["summary"] or previous.get("positions")!=payload["positions"]
+            changed=snapshot_changed(previous,payload)
+            await self._store_history_if_due(account.id,payload,changed)
+            await self._save_latest(account.id,payload)
             self.session.add(ReconciliationLog(exchange_account_id=account.id,external_id=None,occurred_at=datetime.now(timezone.utc),payload={"reason":reason,"changed":changed,"positions":len(positions)}))
             self.session.add(ConnectionStatus(exchange_account_id=account.id,external_id=None,occurred_at=datetime.now(timezone.utc),payload=payload["status"]))
             await self.session.commit()
@@ -35,6 +69,7 @@ class PortfolioService:
             detail=str(exc).replace("\n"," ").strip()
             payload["status"]={"state":"ERROR","last_rest_success":payload.get("status",{}).get("last_rest_success"),"error":f"{exc.__class__.__name__}{': '+detail if detail else ''}"}
             self.session.add(ConnectionStatus(exchange_account_id=account.id,external_id=None,occurred_at=datetime.now(timezone.utc),payload=payload["status"]))
+            await self._save_latest(account.id,payload)
             await self.session.commit()
         await self.redis.set(key,json.dumps(payload,default=str),ex=3600)
         await self.redis.publish(f"portfolio:user:{account.user_id}",json.dumps({"event":"portfolio_updated","account_id":account.id,"reason":reason,"at":datetime.now(timezone.utc).isoformat()}))
@@ -48,7 +83,10 @@ class PortfolioService:
             raw=await self.redis.get(f"portfolio:{account.id}")
             # Retain configuration identity when the first refresh fails, so a
             # bad wallet address is visible as an error instead of "no assets".
-            rows.append({"account":account,"payload":json.loads(raw) if raw else {"summary":None,"positions":[],"status":{"state":"DISCONNECTED","error":"No snapshot yet"}}})
+            stored=await self._stored_payload(account.id) if not raw else None
+            payload=json.loads(raw) if raw else stored or {"summary":None,"positions":[],"status":{"state":"DISCONNECTED","error":"No snapshot yet"}}
+            if not raw and stored: await self.redis.set(f"portfolio:{account.id}",json.dumps(stored,default=str),ex=3600)
+            rows.append({"account":account,"payload":payload})
         summaries=[x["payload"]["summary"] for x in rows if x["payload"].get("summary")]; positions=[p for x in rows for p in x["payload"].get("positions",[])]
         now=datetime.now(timezone.utc)
         def D(v): return Decimal(str(v or "0"))
@@ -65,12 +103,14 @@ class PortfolioService:
         public_accounts=[annotate(s) for s in summaries]
         public_positions=[annotate(p) for p in positions]
         connections=[]
+        coverage=[]
         for row in rows:
             account=row["account"]; payload=row["payload"]
             state={"account_id":account.id,"account_name":account.name,"exchange":account.exchange,**dict(payload.get("status",{}))}; summary=payload.get("summary")
             if summary and state.get("state")=="CONNECTED": state["state"]=annotate(summary)["data_state"]
             connections.append(state)
-        return {"overview":overview,"accounts":public_accounts,"positions":public_positions,"connections":connections,"net_exposure":net_exposure(public_positions,equity)}
+            coverage.append(coverage_for(account,payload))
+        return {"overview":overview,"accounts":public_accounts,"positions":public_positions,"connections":connections,"coverage":coverage,"net_exposure":net_exposure(public_positions,equity)}
 def net_exposure(positions:list[dict],total_equity:Decimal)->list[dict]:
     out=defaultdict(lambda:{"long_quantity":ZERO,"short_quantity":ZERO,"long_notional":ZERO,"short_notional":ZERO,"long_unrealized_pnl":ZERO,"short_unrealized_pnl":ZERO,"by_exchange":defaultdict(lambda:ZERO)})
     for p in positions:

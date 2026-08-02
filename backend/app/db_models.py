@@ -17,6 +17,20 @@ class AccountSnapshot(Base):
     __tablename__="account_snapshots"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); exchange_account_id: Mapped[str]=mapped_column(ForeignKey("exchange_accounts.id",ondelete="CASCADE")); payload: Mapped[dict]=mapped_column(JSON); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class PositionSnapshot(Base):
     __tablename__="positions_snapshots"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); exchange_account_id: Mapped[str]=mapped_column(ForeignKey("exchange_accounts.id",ondelete="CASCADE")); payload: Mapped[dict]=mapped_column(JSON); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class LatestPortfolioState(Base):
+    """Durable latest payload used to restore the dashboard after a restart."""
+    __tablename__="latest_portfolio_states"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    exchange_account_id: Mapped[str]=mapped_column(ForeignKey("exchange_accounts.id",ondelete="CASCADE"),unique=True)
+    payload: Mapped[dict]=mapped_column(JSON)
+    updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
+class PortfolioHistoryState(Base):
+    """An atomic account summary + positions snapshot for historical replay."""
+    __tablename__="portfolio_history_states"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    exchange_account_id: Mapped[str]=mapped_column(ForeignKey("exchange_accounts.id",ondelete="CASCADE"))
+    payload: Mapped[dict]=mapped_column(JSON)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class AuditLog(Base):
     __tablename__="audit_logs"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); exchange_account_id: Mapped[str|None]=mapped_column(ForeignKey("exchange_accounts.id",ondelete="CASCADE"),nullable=True); payload: Mapped[dict]=mapped_column(JSON); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class LedgerBase:

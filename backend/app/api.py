@@ -12,7 +12,7 @@ from .db_models import AuditLog,EncryptedCredential,ExchangeAccount,User
 from .schemas import AccountCreate,AccountView,Login
 from .security import encrypt,password_hash,unauthorized,verify_password
 from .services.portfolio import PortfolioService
-from .services.history import pnl_summary
+from .services.history import equity_history,pnl_attribution,pnl_summary,portfolio_as_of
 router=APIRouter(prefix="/api"); bearer=HTTPBearer(auto_error=False); login_attempts=defaultdict(list)
 def token(user:User)->str:return jwt.encode({"sub":user.id,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},settings.session_secret,algorithm="HS256")
 def current_user(request:Request, credentials:HTTPAuthorizationCredentials|None=Depends(bearer))->str:
@@ -61,3 +61,19 @@ async def pnl(range:str="7d",user_id:str=Depends(current_user),session:AsyncSess
     if days is None and range!="all": raise HTTPException(422,"range must be 1d, 7d, 30d, or all")
     ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
     return await pnl_summary(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
+@router.get("/history/equity")
+async def equity(range:str="30d",user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+    days={"7d":7,"30d":30,"90d":90,"all":None}.get(range)
+    if days is None and range!="all": raise HTTPException(422,"range must be 7d, 30d, 90d, or all")
+    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    return await equity_history(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
+@router.get("/pnl/attribution")
+async def attribution(range:str="30d",user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+    days={"7d":7,"30d":30,"90d":90,"all":None}.get(range)
+    if days is None and range!="all": raise HTTPException(422,"range must be 7d, 30d, 90d, or all")
+    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    return await pnl_attribution(session,ids,datetime.now(timezone.utc)-timedelta(days=days) if days else None)
+@router.get("/history/snapshot")
+async def historical_snapshot(at:datetime,user_id:str=Depends(current_user),session:AsyncSession=Depends(db_session)):
+    ids=(await session.scalars(select(ExchangeAccount.id).where(ExchangeAccount.user_id==user_id,ExchangeAccount.enabled.is_(True)))).all()
+    return await portfolio_as_of(session,ids,at.astimezone(timezone.utc))

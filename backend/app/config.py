@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     bootstrap_password: str | None = None
     cookie_secure: bool = False
     reconcile_interval_seconds: int = 45
+    snapshot_interval_seconds: int = 300
     stale_warning_seconds: int = 10
     stale_seconds: int = 30
     disconnected_seconds: int = 60

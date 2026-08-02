@@ -1,5 +1,9 @@
 import "./globals.css";
 import "./pnl.css";
+import "./coverage.css";
+import "./performance.css";
+import "./attribution.css";
+import "./history.css";
 
 export const metadata = {
   title: "资金驾驶舱",
